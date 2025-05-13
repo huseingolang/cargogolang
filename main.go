@@ -3,9 +3,11 @@ package main
 import (
 	conf "chat/Conf"
 	controller "chat/Controller"
+	"chat/Middleware"
 	model "chat/Model"
 	"fmt"
 	"log"
+	"net/smtp"
 	"sync"
 	"time"
 
@@ -39,7 +41,7 @@ func ChangeStatus() {
 		time.Sleep(10 * time.Second)
 		var orders []model.Order
 		mutex.Lock()
-		if err := conf.DB.Where("current_status != ? ", "Доставлен").Find(&orders).Error; err != nil {
+		if err := conf.DB.Where("current_status != ? ", "не доставлен").Find(&orders).Error; err != nil {
 			log.Println("заказ не найден", err.Error())
 
 		}
@@ -55,6 +57,7 @@ func ChangeStatus() {
 			nextStatus := GetNextStatus(order.CurrentStatus)
 			if nextStatus != " " {
 				order.CurrentStatus = nextStatus
+				SendMessage(order.CurrentStatus)
 				if err := conf.DB.Model(&order).Updates(map[string]interface{}{
 					"current_status": order.CurrentStatus,
 				}); err == nil {
@@ -70,8 +73,30 @@ func ChangeStatus() {
 
 }
 
+func SendMessage(message string) {
+	auth := smtp.PlainAuth(
+		"",
+		"bazarowhusein7@gmail.com",
+		"clfesmllrlekquvc",
+		"smtp.gmail.com",
+	)
+	msg := "Ваш заказ: " + "/n" + message
+
+	err := smtp.SendMail(
+		"smtp.gmail.com:587",
+		auth,
+		"bazarowhusein7@gmail.com",
+		[]string{"bazarowhusein7@gmil.com"},
+		[]byte(msg),
+	)
+	if err != nil {
+		fmt.Println(err)
+	}
+}
+
 func main() {
 	conf.Init()
+	conf.ConnectRedis()
 
 	conf.DB.AutoMigrate(model.User{}, model.Notification{}, model.Status{}, model.Order{}, model.Chake{})
 
@@ -81,7 +106,8 @@ func main() {
 
 	handler.POST("/register", controller.Register)
 	handler.POST("/login", controller.Login)
-	handler.POST("/order", controller.CreateOrder)
+
+	handler.POST("/order", Middleware.AuthUSer, controller.CreateOrder)
 	handler.GET("/order", controller.GetOrder)
 	handler.GET("/chake", controller.FindChake)
 	handler.POST("/chake", controller.CreateChake)

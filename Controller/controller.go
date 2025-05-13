@@ -4,6 +4,7 @@ import (
 	conf "chat/Conf"
 	"chat/Controller/Hook"
 	model "chat/Model"
+	"context"
 	"fmt"
 	"net/http"
 	"sync"
@@ -11,16 +12,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"net/smtp"
-
 	"github.com/gin-gonic/gin"
-)
-
-const (
-	smtpServer     = "smtp.gmail.com"
-	smtPort        = "587"
-	senderEmail    = "bazarowhusein7@gmail.com"
-	senderPassword = "bezeg9912"
 )
 
 var (
@@ -30,6 +22,11 @@ var (
 		"в ожидании",
 		"не доставлен",
 	}
+
+	c       = context.Background()
+	cx      = context.Background()
+	chanche = "user:All"
+	list    = "orders:All"
 )
 
 func Register(ctx *gin.Context) {
@@ -56,12 +53,44 @@ func Register(ctx *gin.Context) {
 
 	user := model.User{Email: body.Email, Password: string(hash)}
 	token := Hook.GenerateJWT(user.Email)
+	chanc := map[string]interface{}{
+		"Email":    user.Email,
+		"Password": user.Password,
+	}
 
 	if err := conf.DB.Where("email = ? ", body.Email).First(&user).Error; err == nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
 			"message": "error email ok",
 		})
 		return
+	}
+	userValue, err := conf.Rdb.HGetAll(c, chanche).Result()
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"message": "error redis nil",
+		})
+		return
+	} else {
+		err := conf.Rdb.HSet(c, chanche, chanc).Err()
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{
+				"message": "error redis create",
+			})
+			return
+
+		}
+		conf.Rdb.Expire(c, chanche, 5*time.Minute)
+
+		value, err := conf.Rdb.HGet(c, chanche, "Email").Result()
+		if err != nil {
+			fmt.Println("error")
+		}
+		fmt.Println(value)
+		ctx.JSON(http.StatusOK, gin.H{
+			"rds": userValue,
+		})
+		fmt.Println(value)
+
 	}
 
 	conf.DB.Create(&user)
@@ -115,6 +144,14 @@ func Login(ctx *gin.Context) {
 		"messageOK": "StatusOK",
 	})
 
+}
+func ValidateUSer(ctx *gin.Context) {
+	var user model.User
+
+	conf.DB.Find(&user)
+	ctx.JSON(http.StatusOK, gin.H{
+		"message": user.ID,
+	})
 }
 func GetProfile(ctx *gin.Context) {
 	id := ctx.Param("id")
@@ -188,7 +225,44 @@ func CreateOrder(ctx *gin.Context) {
 
 	mutex.Lock()
 
+	rdsorder := map[string]interface{}{
+		"Name":          order.Name,
+		"Description":   order.Description,
+		"CurrentStatus": order.CurrentStatus,
+		"UserID":        order.UserID,
+	}
+	userValue, err := conf.Rdb.HGetAll(cx, list).Result()
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"message": "error redis nil",
+		})
+		return
+	} else {
+		err := conf.Rdb.HSet(cx, list, rdsorder).Err()
+		if err != nil {
+			ctx.JSON(http.StatusBadRequest, gin.H{
+				"message": "error redis create",
+			})
+			return
+
+		}
+		conf.Rdb.SAdd(cx, list, rdsorder)
+		conf.Rdb.Expire(cx, list, 5*time.Minute)
+
+		value, err := conf.Rdb.HGet(cx, list, "Name").Result()
+		if err != nil {
+			fmt.Println("error")
+		}
+		fmt.Println(value)
+		ctx.JSON(http.StatusOK, gin.H{
+			"rds": userValue,
+		})
+		fmt.Println(value)
+
+	}
+
 	conf.DB.Create(&order)
+	userID, _ := ctx.Get("UserId")
 
 	mutex.Unlock()
 
@@ -212,7 +286,9 @@ func CreateOrder(ctx *gin.Context) {
 
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":   order,
+		"id":        userID,
 		"messageOK": "StatusOK",
+		"redis":     userValue,
 	})
 
 }
@@ -227,16 +303,24 @@ func CreateChake(ctx *gin.Context) {
 	}
 	var order model.Order
 
-	if err := conf.DB.First("current_status != ?", "доставлен", &order, order.ID).Error; err != nil {
+	err := conf.DB.First(&order, chake.OrderID).Error
+
+	if err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{
-			"message": "error orderID",
+			"message": "error orderId nil ",
 		})
 		return
 	}
 
-	conf.DB.Create(&chake)
-	chake.CurrentStatus = order.CurrentStatus
-	conf.DB.Save(&order)
+	if order.CurrentStatus == "доставлен" {
+		chake.CurrentStatus = order.CurrentStatus
+		conf.DB.Create(&chake)
+	} else {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"message": "error status nil ",
+		})
+		return
+	}
 
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":   chake,
@@ -256,6 +340,14 @@ func FindChake(ctx *gin.Context) {
 func GetOrder(ctx *gin.Context) {
 	var order []model.Order
 
+	orders, err := conf.Rdb.HGetAll(cx, list).Result()
+	if err != nil {
+		ctx.JSON(http.StatusBadRequest, gin.H{
+			"message":   "Error redis found",
+			"messageOK": "StatuNot",
+		})
+	}
+
 	mutex.Lock()
 
 	conf.DB.Find(&order)
@@ -273,6 +365,7 @@ func GetOrder(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":   order,
 		"messageOK": "StatusOK",
+		"redis":     orders,
 	})
 }
 func GetOrderOne(ctx *gin.Context) {
@@ -375,30 +468,10 @@ func CreateStatus(ctx *gin.Context) {
 	conf.DB.Create(&Status)
 	conf.DB.Create(&notification)
 
-	go SendMessageEmail(order.UserID, message)
-
 	ctx.JSON(http.StatusOK, gin.H{
 		"message":   Status,
 		"messageOK": "StatusOK",
 	})
-
-}
-func SendMessageEmail(userID uint, message string) {
-	var order model.Order
-	if err := conf.DB.First(&order, userID).Error; err != nil {
-		panic(err)
-	}
-	auth := smtp.PlainAuth("", senderEmail, senderPassword, smtpServer)
-	body := fmt.Sprintf("To:%s\r\nSubject: Обновление заказа\r\n\r/n%s", order.Name, message)
-	err := smtp.SendMail(smtpServer+":"+smtPort, auth, senderEmail, []string{order.Name}, []byte(body))
-
-	if err != nil {
-		fmt.Println("Ошибка отправки писма ")
-		return
-	}
-	conf.DB.Model(&model.Notification{}).Where("UserID = ?", userID).Update("IsSent", true)
-
-	fmt.Println("уводомление отправлено", order.Name)
 
 }
 
